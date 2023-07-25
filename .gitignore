@@ -368,3 +368,5 @@ listing*
 # VS files exlude
 *.sln
 *.vcxproj*
+/PerfAwareStudy.vcxproj.filters
+/PerfAwareStudy.vcxproj
