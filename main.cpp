@@ -28,6 +28,7 @@ constexpr uint8_t MOD_MEM_DWORD_DISP = 0b10000000;
 constexpr uint8_t MOD_REG = 0b11000000;
 
 #define BINARY_LEFT_BITS_MASK(X) (~1u << (CountTrailingZeros(X) - 1))
+// TODO: Make an inline function
 #define GET_DWORD_FROM_TWO_BYTES(LOW, HIGH) \
 	static_cast<uint16_t>(HIGH) << 8 | static_cast<uint16_t>(LOW); \
 	static_assert(sizeof(LOW) == 1, "Low should be one byte size!"); \
@@ -111,49 +112,68 @@ InstructionType DeduceOpcode(uint8_t first_instruction_byte)
 
 constexpr const char* NOT_IMPLEMENTED_YET = "NOT IMPLEMENTED INSTRUCTION";
 
-std::string DecodeImmediateToRegMov(uint8_t* instruction_buffer, std::ifstream* in_fstream)
+uint16_t ExtractDWORD(std::ifstream* in_fstream)
+{
+	char buffer[2];
+	in_fstream->read(buffer, 2);
+	return GET_DWORD_FROM_TWO_BYTES(buffer[0], buffer[1]);
+}
+
+std::string DecodeData(std::ifstream* in_fstream, const bool wide_flag)
+{
+	if(wide_flag)
+	{
+		return std::to_string(ExtractDWORD(in_fstream));
+	}
+	char buffer;
+	in_fstream->read(&buffer, 1);
+	return std::to_string(static_cast<uint8_t>(buffer));
+}
+
+std::string DecodeImmediateToRegMov(uint8_t first_instruction_byte, std::ifstream* in_fstream)
 {
 	std::string res = "mov ";
-	const bool wide_flag = (instruction_buffer[0] & 1u << 3) >> 3;
-	const uint8_t destination_reg_code = ((instruction_buffer[0] & REG_MEM_MASK) << 1) + wide_flag;
+	const bool wide_flag = (first_instruction_byte & 1u << 3) >> 3;
+	const uint8_t destination_reg_code = ((first_instruction_byte & REG_MEM_MASK) << 1) + wide_flag;
 	res.append(REGISTER_MEMORY_FIELD_DECODE[destination_reg_code]);
 	res.append(", ");
 	// Load additional bytes of instruction, one if not wide, two otherwise
-	if(wide_flag)
+	std::string data_str = DecodeData(in_fstream, wide_flag);
+	res.append(data_str);
+	return res;
+}
+
+std::string DecodeImmediateToRegMemMov(uint8_t current_instruction_byte, std::ifstream* in_fstream)
+{
+	std::string res = "mov ";
+	const bool wide_flag = current_instruction_byte & 1;
+	// Load additional bytes of instruction, one if not wide, two otherwise
+	if (wide_flag)
 	{
-		in_fstream->read(reinterpret_cast<char*>(&instruction_buffer[1]), 2 * sizeof(uint8_t));
-		uint16_t data = GET_DWORD_FROM_TWO_BYTES(instruction_buffer[1], instruction_buffer[2]);
-		res.append(std::to_string(data));
+		res.append(std::to_string(ExtractDWORD(in_fstream)));
 	}
 	else
 	{
-		in_fstream->read(reinterpret_cast<char*>(&instruction_buffer[1]), sizeof(uint8_t));
-		res.append(std::to_string(instruction_buffer[1]));
+		in_fstream->read(reinterpret_cast<char*>(&current_instruction_byte), sizeof(uint8_t));
+		res.append(std::to_string(current_instruction_byte));
 	}
 	return res;
 }
 
-std::string DecodeImmediateToRegMemMov(uint8_t* instruction, std::ifstream* in_fstream)
+std::string DecodeRegToRegMov(uint8_t current_instruction_byte, std::ifstream* in_fstream)
 {
-	return NOT_IMPLEMENTED_YET;
-}
-
-std::string DecodeRegToRegMov(uint8_t* instruction_buffer, std::ifstream* in_fstream)
-{
-	// TODO: Displacement load and handling
 	std::string res = "mov ";
 	// Get flags
-	const bool wide_flag = instruction_buffer[0] & 1;
-	const bool destination_flag = instruction_buffer[0] >> 1 & 1;
-	// Load additional bytes of instruction_buffer
-	in_fstream->read(reinterpret_cast<char*>(&instruction_buffer[1]), sizeof(uint8_t));
-	const uint8_t mod_field = instruction_buffer[1] & MOD_FIELD_MASK;
+	const bool wide_flag = current_instruction_byte & 1;
+	const bool destination_flag = current_instruction_byte >> 1 & 1;
+	// Load additional bytes of current_instruction_byte
+	in_fstream->read(reinterpret_cast<char*>(&current_instruction_byte), sizeof(uint8_t));
+	const uint8_t mod_field = current_instruction_byte & MOD_FIELD_MASK;
 	// Deduce registers
-	const uint8_t reg_mem_val = instruction_buffer[1] & REG_MEM_MASK;
+	const uint8_t reg_mem_val = current_instruction_byte & REG_MEM_MASK;
 	const uint8_t reg_mem_code = (reg_mem_val << 1) + wide_flag;
-	const uint8_t reg_code = ((instruction_buffer[1] & REG_MASK) >> (CountTrailingZeros(REG_MASK) - 1)) + wide_flag;
+	const uint8_t reg_code = ((current_instruction_byte & REG_MASK) >> (CountTrailingZeros(REG_MASK) - 1)) + wide_flag;
 	std::string first_op;
-	std::string second_op = REGISTER_MEMORY_FIELD_DECODE[reg_code];
 	switch (mod_field)
 	{
 	case (MOD_MEM_NO_DISP):
@@ -164,25 +184,22 @@ std::string DecodeRegToRegMov(uint8_t* instruction_buffer, std::ifstream* in_fst
 		}
 		else
 		{
-			in_fstream->read(reinterpret_cast<char*>(&instruction_buffer[2]), 2 * sizeof(uint8_t));
-			uint16_t displacement_val = GET_DWORD_FROM_TWO_BYTES(instruction_buffer[2], instruction_buffer[3]);
-			std::string displacement = std::string(" + ") + std::to_string(displacement_val) + std::string("]");
+			std::string displacement = std::string(" + ") + std::to_string(ExtractDWORD(in_fstream)) + std::string("]");
 			first_op = std::string("[") + EFFECTIVE_ADDRESS_DECODE[reg_mem_val] + displacement;
 		}
 		break;
 	}
 	case (MOD_MEM_BYTE_DISP):
 	{
-		in_fstream->read(reinterpret_cast<char*>(&instruction_buffer[2]), sizeof(uint8_t));
+		in_fstream->read(reinterpret_cast<char*>(&current_instruction_byte), sizeof(uint8_t));
 		// Case for 0 displacement
-		std::string displacement = instruction_buffer[2] ? std::string(" + ") + std::to_string(instruction_buffer[2]) + std::string("]") : "]";
+		std::string displacement = current_instruction_byte ? std::string(" + ") + std::to_string(current_instruction_byte) + std::string("]") : "]";
 		first_op = std::string("[") + EFFECTIVE_ADDRESS_DECODE[reg_mem_val] + displacement;
 		break;
 	}
 	case (MOD_MEM_DWORD_DISP):
 	{
-		in_fstream->read(reinterpret_cast<char*>(&instruction_buffer[2]), 2 * sizeof(uint8_t));
-		uint16_t displacement_val = GET_DWORD_FROM_TWO_BYTES(instruction_buffer[2], instruction_buffer[3]);
+		uint16_t displacement_val = ExtractDWORD(in_fstream);
 		// Case for 0 displacement
 		std::string displacement = displacement_val ? std::string(" + ") + std::to_string(displacement_val) + std::string("]") : "]";
 		first_op = std::string("[") + EFFECTIVE_ADDRESS_DECODE[reg_mem_val] + displacement;
@@ -194,7 +211,7 @@ std::string DecodeRegToRegMov(uint8_t* instruction_buffer, std::ifstream* in_fst
 	default:
 		std::cerr << "Error: something went wrong calculating the MOD field!" << std::endl;
 	}
-
+	std::string second_op = REGISTER_MEMORY_FIELD_DECODE[reg_code];
 	if (destination_flag)
 	{
 		first_op.swap(second_op);
@@ -205,21 +222,21 @@ std::string DecodeRegToRegMov(uint8_t* instruction_buffer, std::ifstream* in_fst
 	return res;
 }
 
-std::string DecodeBinary8086(uint8_t* instruction, std::ifstream* in_fstream, InstructionType type)
+std::string DecodeBinary8086(uint8_t first_instruction_byte, std::ifstream* in_fstream, InstructionType type)
 {
-	typedef std::string(*InstructionDecodeFunc) (uint8_t*, std::ifstream*);
+	typedef std::string(*InstructionDecodeFunc) (uint8_t, std::ifstream*);
 	constexpr InstructionDecodeFunc decode_callbacks[] = {
 		DecodeRegToRegMov,
 		DecodeImmediateToRegMemMov,
 		DecodeImmediateToRegMov
 	};
 	static_assert(std::size(decode_callbacks) == NUMBER_OF_INSTRUCTION_TYPES, "Every type should have corresponding decode callback!");
-	return decode_callbacks[type](instruction, in_fstream);
+	return decode_callbacks[type](first_instruction_byte, in_fstream);
 }
 
 int main(int argc, char** argv)
 {
-	constexpr const char* input_filename = "listing_0039_more_movs";
+	constexpr const char* input_filename = "listing_0040_challenge_movs";
 	constexpr const char* output_filename = "code.asm";
 	std::ifstream in_fstream{ input_filename, std::ios::binary};
 	std::ofstream out_fstream{ output_filename };
@@ -239,24 +256,24 @@ int main(int argc, char** argv)
 	out_fstream << "bits 16\n";
 
 	// Maximum instruction byte size is 6
-	uint8_t instruction_buffer[6];
+	uint8_t instruction_byte;
 	while(true)
 	{
 		// TODO: There is a problem of binary file ending, how to detect properly?
 	    // Read first byte and deduce the type, then load needed bytes
-		in_fstream.read(reinterpret_cast<char*>(&instruction_buffer), sizeof(uint8_t));
+		in_fstream.read(reinterpret_cast<char*>(&instruction_byte), sizeof(uint8_t));
 		if(in_fstream.eof())
 		{
 			break;
 		}
-		InstructionType type = DeduceOpcode(instruction_buffer[0]);
+		InstructionType type = DeduceOpcode(instruction_byte);
 		// TODO: Debug ifdef this check
 		if (type == NUMBER_OF_INSTRUCTION_TYPES)
 		{
 			std::cerr << "Error: Could not deduce instruction type, shutting down!" << std::endl;
 			return 1;
 		}
-		out_fstream << DecodeBinary8086(&instruction_buffer[0], &in_fstream, type) << "\n";
+		out_fstream << DecodeBinary8086(instruction_byte, &in_fstream, type) << "\n";
 	}
 	in_fstream.close();
 	out_fstream.close();
